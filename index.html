@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>RutaLibre — rutas en moto a Google Maps</title>
+<meta name="description" content="Rutas en moto que se abren en Google Maps con un toque: ruta sorpresa por kilómetros o desde tu GPX de Wikiloc o gpx.studio. Libre y gratuito.">
+<meta name="theme-color" content="#111315">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="vendor/maplibre-gl.css">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><img src="icons/icon.svg" alt="" width="28" height="28"><span>RutaLibre</span></div>
+  <button class="locate" id="locateBtn" title="Usar mi ubicación">📍</button>
+</header>
+
+<div id="map" aria-label="Mapa"></div>
+<div id="mapMsg" class="mapmsg hidden"></div>
+
+<main class="panel">
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="sorpresa" class="on">Ruta sorpresa</button>
+    <button role="tab" data-tab="gpx">Desde un GPX</button>
+  </nav>
+
+  <!-- ===================== RUTA SORPRESA ===================== -->
+  <section id="tab-sorpresa">
+    <label class="lbl">¿Cuántos kilómetros?</label>
+    <div class="row">
+      <div class="seg" id="kmSeg"><button data-v="50">50</button><button data-v="75">75</button><button data-v="100" class="on">100</button><button data-v="150">150</button></div>
+      <input id="kmIn" class="txt km" type="number" inputmode="numeric" min="10" max="400" placeholder="otro">
+    </div>
+    <label class="lbl">Hacia dónde</label>
+    <div class="seg wrap" id="dirSeg"><button data-v="-1" class="on">Sorpréndeme</button><button data-v="0">N</button><button data-v="90">E</button><button data-v="180">S</button><button data-v="270">O</button></div>
+    <div class="row checks">
+      <label><input type="checkbox" id="sAvh" checked> Evitar autopistas</label>
+      <label><input type="checkbox" id="sAvt" checked> Evitar peajes</label>
+    </div>
+    <p class="hint" id="startHint">Salida: tu ubicación. También puedes <b>tocar el mapa</b> para elegir otro punto de salida.</p>
+    <button class="big" id="genBtn">Generar ruta</button>
+
+    <div id="sOut" class="out hidden">
+      <p class="stats" id="sStats"></p>
+      <a class="big go" id="sGo" target="_blank" rel="noopener">Abrir en Google Maps</a>
+      <div class="row two">
+        <button class="ghost" id="againBtn">Otra ruta</button>
+        <button class="ghost" id="sShare">Compartir</button>
+      </div>
+      <p class="hint">¿Algún punto en un sitio raro? <b>Arrástralo</b> en el mapa y el enlace se actualiza solo.</p>
+      <details class="more">
+        <summary>Para StreetCross y otros navegadores</summary>
+        <button class="link" id="sTowns">Ver lista de pueblos</button>
+        <button class="link" id="sWpt">Descargar puntos (.gpx)</button>
+      </details>
+    </div>
+  </section>
+
+  <!-- ===================== DESDE UN GPX ===================== -->
+  <section id="tab-gpx" class="hidden">
+    <label class="drop" id="drop">
+      <strong>Elegir archivo .gpx</strong>
+      <span id="fname">De Wikiloc, gpx.studio… o arrástralo aquí</span>
+      <input type="file" id="file" accept=".gpx,application/gpx+xml,application/xml,text/xml">
+    </label>
+    <label class="lbl">Cómo repartir los puntos</label>
+    <div class="seg wrap" id="modeSeg">
+      <button data-v="one" class="on">Un solo enlace</button><button data-v="12">Baja</button><button data-v="7">Media</button><button data-v="4">Alta</button>
+    </div>
+    <label class="lbl">Puntos por enlace</label>
+    <div class="seg" id="perSeg"><button data-v="9" class="on">9 (app de Maps)</button><button data-v="3">3 (navegador)</button></div>
+    <div class="row checks">
+      <label><input type="checkbox" id="gAvh"> Evitar autopistas</label>
+      <label><input type="checkbox" id="gAvt"> Evitar peajes</label>
+    </div>
+
+    <div id="gOut" class="out hidden">
+      <p class="stats" id="gStats"></p>
+      <div id="legs"></div>
+      <p class="hint">Compara la ruta que te enseña Maps con la tuya antes de salir. Si se desvía en algún tramo, <b>arrastra</b> el punto más cercano sobre la carretera que quieres.</p>
+      <details class="more">
+        <summary>Para StreetCross y otros navegadores</summary>
+        <button class="link" id="gTowns">Ver lista de pueblos</button>
+        <button class="link" id="gTrack">Descargar track (.gpx) — StreetCross lo importa, pero no recalcula</button>
+        <button class="link" id="gWpt">Descargar puntos (.gpx)</button>
+      </details>
+    </div>
+  </section>
+
+  <!-- lista de pueblos (compartida) -->
+  <div id="towns" class="out hidden">
+    <p class="lbl">Puntos de paso, en orden</p>
+    <ol id="townList"></ol>
+    <div class="row checks"><label><input type="checkbox" id="useNames"> Usar los nombres de pueblo en el enlace de Maps</label></div>
+    <p class="hint">Con nombres, Maps va al centro de cada pueblo: evita desvíos a caminos o parkings, pero puede meterte en el pueblo aunque tu ruta lo rodee.</p>
+    <button class="ghost" id="copyTowns">Copiar lista</button>
+  </div>
+
+  <footer class="foot">
+    <details>
+      <summary>Cómo funciona</summary>
+      <p>Google Maps no sigue líneas dibujadas: va de punto en punto. RutaLibre elige los puntos (hasta 10 por enlace, el máximo de Maps) para que siga tu ruta. Si te pasas una salida, Maps recalcula hacia el siguiente punto, y te avisa de radares.</p>
+      <p>En «Ruta sorpresa» los km son aproximados: la distancia exacta te la da Maps antes de arrancar.</p>
+    </details>
+    <p>Software libre (GPL-3.0) · Mapa © <a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a>, datos © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> · Pueblos: <a href="https://nominatim.org" target="_blank" rel="noopener">Nominatim</a></p>
+  </footer>
+</main>
+
+<div id="toast" class="toast hidden" role="status"></div>
+
+<script src="vendor/maplibre-gl.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
