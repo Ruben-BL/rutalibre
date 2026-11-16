@@ -133,22 +133,126 @@ export function routeFromTrack(pts, { mode = 'one', kmPer = 7, per = 9 } = {}) {
 }
 
 /**
- * Ruta sorpresa: vuelta circular de ~km kilómetros desde `start`.
- * dir: rumbo en grados (0 = norte) o -1 para aleatorio.
- * Las carreteras son ~35% más largas que la línea recta (ROAD).
+ * Ruta sorpresa: parámetros aleatorios de la vuelta (se generan una vez y se reutilizan
+ * al reescalar, para que la forma no cambie al ajustar los km).
  */
-export function surpriseLoop(start, km, dir = -1, { n = 8, rand = Math.random } = {}) {
-  const ROAD = 1.35;
+export function loopParams(dir = -1, { n = 8, rand = Math.random } = {}) {
   const brg = dir < 0 ? rand() * 360 : dir + (rand() * 40 - 20);
-  const rad = km * 1000 / (2 * Math.PI * ROAD);
-  const center = destPoint(start, brg, rad);
-  const back = (brg + 180) % 360, sense = rand() < 0.5 ? 1 : -1;
-  const points = [];
-  for (let i = 1; i <= n; i++) {
-    const ang = back + sense * (360 * i / (n + 1)) + (rand() * 16 - 8);
-    points.push(destPoint(center, ang, rad * (0.8 + rand() * 0.4)));
+  return {
+    brg: (brg + 360) % 360, sense: rand() < 0.5 ? 1 : -1,
+    jit: Array.from({ length: n }, () => [rand() * 16 - 8, 0.8 + rand() * 0.4]),
+  };
+}
+
+/**
+ * Puntos de una vuelta circular de ~km kilómetros desde `start` (la salida está en el círculo).
+ * Las carreteras son ~35% más largas que la línea recta (ROAD); `scale` corrige ese cálculo
+ * cuando ya sabemos los km reales.
+ */
+export function loopPoints(start, km, P, scale = 1) {
+  const ROAD = 1.35, n = P.jit.length;
+  const rad = km * 1000 / (2 * Math.PI * ROAD) * scale;
+  const center = destPoint(start, P.brg, rad);
+  const back = (P.brg + 180) % 360;
+  return P.jit.map(([da, fr], i) => destPoint(center, back + P.sense * (360 * (i + 1) / (n + 1)) + da, rad * fr));
+}
+
+/** Atajo de la fase 1: vuelta geométrica sin ajustar a carreteras. */
+export function surpriseLoop(start, km, dir = -1, { n = 8, rand = Math.random } = {}) {
+  const P = loopParams(dir, { n, rand });
+  return { brg: P.brg, points: loopPoints(start, km, P) };
+}
+
+// ---------- comparar una ruta calculada con el track ----------
+
+/** Índice espacial sencillo (rejilla) de los segmentos de una polilínea, en metros. */
+function segmentIndex(shape, proj, cell = 400) {
+  const xy = shape.map(proj), grid = new Map();
+  const key = (i, j) => i + ',' + j;
+  for (let k = 1; k < xy.length; k++) {
+    const [ax, ay] = xy[k - 1], [bx, by] = xy[k];
+    const i0 = Math.floor(Math.min(ax, bx) / cell), i1 = Math.floor(Math.max(ax, bx) / cell);
+    const j0 = Math.floor(Math.min(ay, by) / cell), j1 = Math.floor(Math.max(ay, by) / cell);
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+      const kk = key(i, j); if (!grid.has(kk)) grid.set(kk, []); grid.get(kk).push(k);
+    }
   }
-  return { brg: (brg + 360) % 360, points };
+  return { xy, grid, cell, key };
+}
+function distToIndex(p, ix) {
+  const { xy, grid, cell, key } = ix, [px, py] = p;
+  const ci = Math.floor(px / cell), cj = Math.floor(py / cell);
+  let best = Infinity;
+  for (let i = ci - 1; i <= ci + 1; i++) for (let j = cj - 1; j <= cj + 1; j++) {
+    const segs = grid.get(key(i, j)); if (!segs) continue;
+    for (const k of segs) {
+      const [ax, ay] = xy[k - 1], [bx, by] = xy[k], dx = bx - ax, dy = by - ay, L = dx * dx + dy * dy;
+      let t = L ? ((px - ax) * dx + (py - ay) * dy) / L : 0; t = Math.max(0, Math.min(1, t));
+      best = Math.min(best, Math.hypot(px - (ax + t * dx), py - (ay + t * dy)));
+    }
+  }
+  return best; // Infinity = a más de ~1 celda de distancia
+}
+
+/**
+ * Compara el track con la ruta calculada.
+ * - pct: % del track que la ruta recorre (a menos de `tol` m).
+ * - gaps: tramos del track que la ruta se salta (ordenados de mayor a menor), con su índice central.
+ * - extraKm: km de la ruta que van por fuera del track (rodeos, idas y vueltas).
+ */
+export function compareRoute(track, shape, { tol = 150, step = 150, minGapKm = 0.4 } = {}) {
+  const proj = projector(track), cum = cumulative(track), total = cum[cum.length - 1];
+  const rIx = segmentIndex(shape, proj), tIx = segmentIndex(track, proj);
+  const samples = [];
+  let j = 0;
+  for (let d = 0; d <= total; d += step) {
+    while (j < track.length - 1 && cum[j] < d) j++;
+    samples.push({ i: j, km: cum[j] / 1000, off: distToIndex(proj(track[j]), rIx) > tol });
+  }
+  const on = samples.filter(s => !s.off).length;
+  const gaps = [];
+  for (let k = 0; k < samples.length;) {
+    if (!samples[k].off) { k++; continue; }
+    let e = k; while (e + 1 < samples.length && samples[e + 1].off) e++;
+    const lenKm = samples[e].km - samples[k].km + step / 1000;
+    if (lenKm >= minGapKm) gaps.push({ fromKm: samples[k].km, toKm: samples[e].km, lenKm, mid: samples[Math.floor((k + e) / 2)].i });
+    k = e + 1;
+  }
+  gaps.sort((a, b) => b.lenKm - a.lenKm);
+  const rc = cumulative(shape); let extra = 0;
+  for (let k = 1; k < shape.length; k++) if (distToIndex(proj(shape[k]), tIx) > tol) extra += rc[k] - rc[k - 1];
+  return { pct: samples.length ? on / samples.length : 1, gaps, extraKm: extra / 1000 };
+}
+
+/**
+ * Detecta "pinchos": paradas a las que la ruta llega y vuelve por el mismo camino.
+ * legs: tramos de la ruta (uno por parada). Devuelve, para cada parada intermedia,
+ * los km de ida y vuelta repetidos (0 = sin pincho).
+ */
+export function spurLengths(legs, { tol = 30, step = 50, maxKm = 8 } = {}) {
+  const out = [];
+  for (let w = 1; w < legs.length; w++) {
+    const before = legs[w - 1].shape.slice().reverse(), after = legs[w].shape;
+    const cb = cumulative(before), ca = cumulative(after);
+    let d = step, last = 0;
+    const at = (shape, cum, dist) => { let k = 0; while (k < cum.length - 1 && cum[k] < dist) k++; return shape[k]; };
+    while (d <= maxKm * 1000 && d <= cb[cb.length - 1] && d <= ca[ca.length - 1]) {
+      if (haversine(at(before, cb, d), at(after, ca, d)) > tol) break;
+      last = d; d += step;
+    }
+    out.push(last / 1000);
+  }
+  return out;
+}
+
+/** Punto situado `km` antes del final de una polilínea (recorriéndola hacia atrás). */
+export function pointBackAlong(shape, km) {
+  let acc = 0;
+  for (let k = shape.length - 1; k > 0; k--) {
+    acc += haversine(shape[k], shape[k - 1]);
+    if (acc >= km * 1000) return shape[k - 1].slice();
+  }
+  return shape[0].slice();
 }
 
 /** Distancia en línea recta (km) de una lista de puntos, cerrando en el último. */

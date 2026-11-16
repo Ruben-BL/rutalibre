@@ -86,3 +86,13 @@ a{color:var(--blue)}
   .mapmsg{grid-row:2;grid-column:1;margin:0;height:auto}
   .panel{grid-row:2;grid-column:2;overflow:auto;max-width:none;border-left:1px solid var(--line)}
 }
+
+/* fase 2 */
+.prog{color:var(--tx);font-size:14px;margin:10px 0 0;display:flex;gap:8px;align-items:center}
+.prog::before{content:"";width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--acc);border-radius:50%;animation:spin .8s linear infinite;flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+button:disabled{opacity:.5;cursor:wait}
+.pct{display:inline-block;margin-top:6px;font-weight:700}
+.pct.good{color:var(--ok)} .pct.mid{color:#f5b83d} .pct.bad{color:#ff6b6b}
+.sw{display:inline-block;width:18px;height:4px;border-radius:2px;vertical-align:middle}
+.sw.red{background:#d7263d} .sw.blue{background:#1e6bff}

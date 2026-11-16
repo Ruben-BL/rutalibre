@@ -1,25 +1,39 @@
-// RutaLibre — interfaz. La lógica de rutas está en geo.js.
+// RutaLibre — interfaz.
+// geo.js: geometría y enlaces · router.js: motor de rutas Valhalla · planner.js: planificador.
 import * as G from './geo.js';
+import { Router, DEFAULT_ROUTER } from './router.js';
+import * as P from './planner.js';
 
 const $ = id => document.getElementById(id);
-const MAP_STYLE = new URLSearchParams(location.search).get('style') || 'https://tiles.openfreemap.org/styles/liberty';
+const params = new URLSearchParams(location.search);
+const MAP_STYLE = params.get('style') || 'https://tiles.openfreemap.org/styles/liberty';
 const LEG_COLORS = ['#ff5a36', '#4a90ff', '#2fbf71', '#f5b83d', '#c77dff', '#00c2c7'];
-const DEFAULT_CENTER = [41.56, 2.01]; // Terrassa; solo hasta tener tu ubicación
+const DEFAULT_CENTER = [41.56, 2.01]; // solo hasta tener tu ubicación
+
+// ---------------- almacenamiento local (preferencias de este dispositivo) ----------------
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('rl.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('rl.' + k, JSON.stringify(v)); } catch { /* sin almacenamiento */ } },
+};
+// Motor de rutas: ?router=URL lo cambia y se recuerda; ?router=default vuelve al público.
+if (params.get('router')) store.set('router', params.get('router') === 'default' ? null : params.get('router'));
+const router = new Router(store.get('router', null) || DEFAULT_ROUTER);
 
 // ---------------- estado ----------------
 const S = {
   tab: 'sorpresa',
   here: null,          // tu ubicación [lat,lon]
   start: null,         // salida elegida tocando el mapa
-  loop: null,          // { start, km, brg, points }
+  loop: null,          // plan de ruta sorpresa { start, points, route?, km, brg, target, exact }
   gpx: null,           // { name, pts }
-  route: null,         // resultado de G.routeFromTrack
-  towns: null,         // { key, names: [{name, province, label}] }
+  plan: null,          // plan del GPX { legs, route?, pct?, total, start, exact }
+  towns: null,
+  busy: 0,             // contador para descartar resultados antiguos
 };
 
 // ---------------- utilidades de interfaz ----------------
 let toastTimer;
-function toast(msg, ms = 2600) {
+function toast(msg, ms = 2800) {
   const t = $('toast'); t.textContent = msg; t.classList.remove('hidden');
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.add('hidden'), ms);
 }
@@ -31,10 +45,6 @@ function bindSeg(id, onChange) {
     onChange && onChange(b.dataset.v);
   });
 }
-const store = {
-  get(k, d) { try { const v = localStorage.getItem('rl.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem('rl.' + k, JSON.stringify(v)); } catch { /* sin almacenamiento */ } },
-};
 function download(text, filename) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([text], { type: 'application/gpx+xml' }));
@@ -42,6 +52,7 @@ function download(text, filename) {
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 const slug = s => (s || 'ruta').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w]+/g, '_').replace(/^_|_$/g, '').slice(0, 40) || 'ruta';
+function busy(el, text) { el.textContent = text; el.classList.toggle('hidden', !text); }
 
 // ---------------- mapa ----------------
 let map = null, mapReady = false, markers = [];
@@ -56,27 +67,30 @@ function initMap() {
     return mapFail('Tu navegador no puede mostrar el mapa (WebGL desactivado). El resto funciona igual.');
   }
   map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
-  map.on('error', e => { if (!mapReady) console.warn('Mapa:', e && e.error); });
   map.on('load', () => {
     mapReady = true;
-    map.addSource('track', { type: 'geojson', data: emptyFC() });
-    map.addSource('loop', { type: 'geojson', data: emptyFC() });
-    map.addLayer({ id: 'track', type: 'line', source: 'track', paint: { 'line-color': '#d7263d', 'line-width': 4, 'line-opacity': .85 }, layout: { 'line-join': 'round', 'line-cap': 'round' } });
-    map.addLayer({ id: 'loop', type: 'line', source: 'loop', paint: { 'line-color': '#ff5a36', 'line-width': 3, 'line-dasharray': [2, 2] } });
-    render();
+    for (const id of ['track', 'route', 'guide']) map.addSource(id, { type: 'geojson', data: emptyFC() });
+    const round = { 'line-join': 'round', 'line-cap': 'round' };
+    map.addLayer({ id: 'track', type: 'line', source: 'track', layout: round, paint: { 'line-color': '#d7263d', 'line-width': 6, 'line-opacity': .55 } });
+    map.addLayer({ id: 'route', type: 'line', source: 'route', layout: round, paint: { 'line-color': '#1e6bff', 'line-width': 3.5, 'line-opacity': .95 } });
+    map.addLayer({ id: 'guide', type: 'line', source: 'guide', paint: { 'line-color': '#ff5a36', 'line-width': 3, 'line-dasharray': [2, 2] } });
+    render(true);
   });
   map.on('click', e => {
     if (S.tab !== 'sorpresa') return;
     S.start = [e.lngLat.lat, e.lngLat.lng];
     $('startHint').innerHTML = 'Salida: <b>el punto que has tocado</b>. <a href="#" id="useHere">Volver a mi ubicación</a>';
-    $('useHere').onclick = ev => { ev.preventDefault(); S.start = null; $('startHint').innerHTML = 'Salida: tu ubicación. También puedes <b>tocar el mapa</b> para elegir otro punto de salida.'; render(); };
-    if (S.loop) regenerate(); else render();
+    $('useHere').onclick = ev => { ev.preventDefault(); S.start = null; $('startHint').innerHTML = HINT_START; render(); };
+    if (S.loop) generate(); else render();
     toast('Salida fijada aquí');
   });
 }
+const HINT_START = 'Salida: tu ubicación. También puedes <b>tocar el mapa</b> para elegir otro punto de salida.';
 function mapFail(msg) { const m = $('mapMsg'); m.textContent = msg; m.classList.remove('hidden'); }
 const emptyFC = () => ({ type: 'FeatureCollection', features: [] });
 const lineFC = coords => ({ type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords.map(p => [p[1], p[0]]) } }] });
+function setLine(id, coords) { if (mapReady) map.getSource(id).setData(coords && coords.length > 1 ? lineFC(thin(coords)) : emptyFC()); }
+const thin = c => { const step = Math.max(1, Math.floor(c.length / 4000)); return c.filter((_, i) => i % step === 0 || i === c.length - 1); };
 
 function clearMarkers() { markers.forEach(m => m.remove()); markers = []; }
 function addMarker(p, label, cls, color, onDrag) {
@@ -90,7 +104,7 @@ function addMarker(p, label, cls, color, onDrag) {
   markers.push(m);
 }
 function fit(points) {
-  if (!mapReady || !points.length) return;
+  if (!mapReady || !points || !points.length) return;
   const b = new maplibregl.LngLatBounds();
   points.forEach(p => b.extend([p[1], p[0]]));
   map.fitBounds(b, { padding: 50, maxZoom: 13, duration: 600 });
@@ -109,43 +123,89 @@ function locate(silent) {
   });
 }
 
-// ---------------- ruta sorpresa ----------------
-function sOpts() { return { avoidHighways: $('sAvh').checked, avoidTolls: $('sAvt').checked }; }
-function kmChosen() { return +$('kmIn').value || +segValue('kmSeg') || 100; }
+// ================= RUTA SORPRESA =================
+const sOpts = () => ({ avoidHighways: $('sAvh').checked, avoidTolls: $('sAvt').checked });
+const kmChosen = () => +$('kmIn').value || +segValue('kmSeg') || 100;
 
 async function generate() {
   const km = kmChosen();
   if (km < 10 || km > 400) return toast('Elige entre 10 y 400 km');
   let start = S.start || S.here;
   if (!start) {
-    $('genBtn').textContent = 'Buscando tu ubicación…';
-    try { start = await locate(); } catch { $('genBtn').textContent = 'Generar ruta'; return; }
-    $('genBtn').textContent = 'Generar ruta';
+    busy($('sProg'), 'Buscando tu ubicación…');
+    try { start = await locate(); } catch { busy($('sProg'), ''); return; }
   }
-  const dir = +segValue('dirSeg');
-  const r = G.surpriseLoop(start, km, dir);
-  S.loop = { start, km, ...r };
-  S.towns = null; $('towns').classList.add('hidden');
-  store.set('km', km);
+  const dir = +segValue('dirSeg'), my = ++S.busy;
+  $('genBtn').disabled = $('againBtn').disabled = true;
+  S.towns = null; $('towns').classList.add('hidden'); store.set('km', km);
+  try {
+    const plan = await P.planSurprise(start, km, dir, sOpts(), router, m => my === S.busy && busy($('sProg'), m));
+    if (my !== S.busy) return;
+    S.loop = { ...plan, exact: true };
+  } catch (e) {
+    if (my !== S.busy) return;
+    console.warn(e);
+    const r = G.surpriseLoop(start, km, dir);
+    S.loop = { start, points: r.points, brg: r.brg, km, target: km, exact: false };
+    toast('El motor de rutas no responde: ruta aproximada, sin comprobar carreteras.', 4500);
+  } finally {
+    if (my === S.busy) { busy($('sProg'), ''); $('genBtn').disabled = $('againBtn').disabled = false; }
+  }
   render(true);
 }
-function regenerate() { S.loop = null; generate(); }
 
-function loopStops() { return [...S.loop.points, S.loop.start]; }
-function loopUrl() {
-  const names = useNamesFor('loop');
-  return G.mapsUrl(names || loopStops(), sOpts());
+async function dragLoopPoint(i, p) {
+  S.loop.points[i] = p; S.towns = null;
+  if (!S.loop.exact) return render();
+  const my = ++S.busy; busy($('sProg'), 'Recalculando…');
+  try {
+    let r = await router.route([S.loop.start, ...S.loop.points, S.loop.start], sOpts(), { minClass: 'tertiary' });
+    r = await P.fixSpurs(S.loop.start, r.stops, r, sOpts(), router, () => {});
+    if (my !== S.busy) return;
+    S.loop = { ...S.loop, points: r.points, route: r, km: r.km };
+  } catch (e) { toast('No hay carretera ahí. Prueba en otro sitio.'); }
+  finally { if (my === S.busy) busy($('sProg'), ''); }
+  render();
 }
+const loopUrl = () => G.mapsUrl(useNamesFor('loop') || [...S.loop.points, S.loop.start], sOpts());
 
-// ---------------- desde un GPX ----------------
-function gOpts() { return { avoidHighways: $('gAvh').checked, avoidTolls: $('gAvt').checked }; }
-function buildRoute() {
+// ================= DESDE UN GPX =================
+const gOpts = () => ({ avoidHighways: $('gAvh').checked, avoidTolls: $('gAvt').checked });
+
+async function buildPlan() {
   if (!S.gpx) return;
-  const mode = segValue('modeSeg');
-  S.route = G.routeFromTrack(S.gpx.pts, { mode: mode === 'one' ? 'one' : 'legs', kmPer: +mode || 7, per: +segValue('perSeg') });
+  const maxLinks = +segValue('linksSeg'), per = +segValue('perSeg'), my = ++S.busy;
   S.towns = null; $('towns').classList.add('hidden');
+  try {
+    const plan = await P.planTrack(S.gpx.pts, { maxLinks, per, ...gOpts() }, router, m => my === S.busy && busy($('gProg'), m));
+    if (my !== S.busy) return;
+    S.plan = { ...plan, exact: true };
+  } catch (e) {
+    if (my !== S.busy) return;
+    console.warn(e);
+    S.plan = { ...G.routeFromTrack(S.gpx.pts, { mode: maxLinks === 1 ? 'one' : 'legs', kmPer: 7, per }), exact: false };
+    toast('El motor de rutas no responde: puntos sin comprobar (como en la versión anterior).', 4500);
+  } finally { if (my === S.busy) busy($('gProg'), ''); }
   render(true);
 }
+
+async function dragTrackPoint(li, pi, p) {
+  S.plan.legs[li].points[pi] = p; S.towns = null;
+  if (!S.plan.exact) return render();
+  const my = ++S.busy; busy($('gProg'), 'Recalculando…');
+  try {
+    const stops = S.plan.legs.flatMap(l => l.points);
+    const r = await router.route([S.gpx.pts[0], ...stops], gOpts(), { minClass: 'residential', radius: 60 });
+    if (my !== S.busy) return;
+    const snapped = [...r.stops, stops[stops.length - 1]]; let k = 0;
+    S.plan.legs.forEach(l => { l.points = l.points.map(() => snapped[k++]); });
+    const cmp = G.compareRoute(S.gpx.pts, r.shape);
+    S.plan = { ...S.plan, route: r, pct: cmp.pct, gaps: cmp.gaps, km: r.km };
+  } catch (e) { toast('No hay carretera ahí. Prueba en otro sitio.'); }
+  finally { if (my === S.busy) busy($('gProg'), ''); }
+  render();
+}
+
 function loadFile(file) {
   if (!file) return;
   const rd = new FileReader();
@@ -153,13 +213,15 @@ function loadFile(file) {
     try {
       const g = G.parseGpx(rd.result);
       S.gpx = { name: g.name || file.name.replace(/\.gpx$/i, ''), pts: g.pts };
+      S.plan = null;
       $('drop').classList.add('has'); $('fname').textContent = file.name;
-      buildRoute();
+      render(true);
+      buildPlan();
     } catch (e) { toast(e.message, 4000); }
   };
   rd.readAsText(file);
 }
-function routeStops() { return S.route.legs.flatMap(l => l.points); }
+const planStops = () => S.plan.legs.flatMap(l => l.points);
 
 // ---------------- pueblos (Nominatim) ----------------
 // Nominatim pide como máximo 1 petición por segundo: se piden de una en una y se guardan.
@@ -172,13 +234,12 @@ async function reverse(p) {
   const res = await fetch(url, { headers: { Accept: 'application/json' } });
   if (!res.ok) throw new Error('Nominatim ' + res.status);
   const j = await res.json(), a = j.address || {};
-  const name = a.village || a.town || a.city || a.municipality || a.hamlet || a.suburb || '';
-  const out = { name, province: a.province || a.county || a.state || '' };
+  const out = { name: a.village || a.town || a.city || a.municipality || a.hamlet || a.suburb || '', province: a.province || a.county || a.state || '' };
   geoCache.set(key, out); await sleep(1100);
   return out;
 }
 async function showTowns(kind) {
-  const pts = kind === 'loop' ? [S.loop.start, ...S.loop.points, S.loop.start] : [S.route.start, ...routeStops()];
+  const pts = kind === 'loop' ? [S.loop.start, ...S.loop.points, S.loop.start] : [S.plan.start, ...planStops()];
   const key = kind + ':' + pts.map(p => p.join()).join('|');
   const box = $('towns'), list = $('townList');
   box.classList.remove('hidden'); box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -206,49 +267,57 @@ function useNamesFor(kind) {
 
 // ---------------- dibujar ----------------
 function render(fitView) {
-  // --- sorpresa ---
-  if (S.tab === 'sorpresa') {
-    if (mapReady) { map.getSource('track').setData(emptyFC()); clearMarkers(); }
-    const start = S.loop ? S.loop.start : (S.start || S.here);
-    if (S.loop) {
-      const ring = [S.loop.start, ...S.loop.points, S.loop.start];
-      if (mapReady) {
-        map.getSource('loop').setData(lineFC(ring));
-        S.loop.points.forEach((p, i) => addMarker(p, i + 1, '', null, np => { S.loop.points[i] = np; S.towns = null; render(); }));
-      }
-      $('sOut').classList.remove('hidden');
-      $('sStats').innerHTML = `Vuelta de <b>~${S.loop.km} km</b> hacia el ${G.compass(S.loop.brg)} · ${S.loop.points.length} puntos de paso. La distancia exacta te la da Maps.`;
-      $('sGo').href = loopUrl();
-      if (fitView) fit(ring);
-    } else if (mapReady) map.getSource('loop').setData(emptyFC());
-    if (start && mapReady) addMarker(start, '●', 'start');
-    return;
-  }
-  // --- gpx ---
-  if (mapReady) { map.getSource('loop').setData(emptyFC()); clearMarkers(); }
-  if (!S.gpx || !S.route) { if (mapReady) map.getSource('track').setData(emptyFC()); return; }
-  if (mapReady) {
-    const step = Math.max(1, Math.floor(S.gpx.pts.length / 3000));
-    map.getSource('track').setData(lineFC(S.gpx.pts.filter((_, i) => i % step === 0 || i === S.gpx.pts.length - 1)));
-    addMarker(S.route.start, '●', 'start');
-  }
-  let n = 0;
+  clearMarkers();
+  if (S.tab === 'sorpresa') return renderLoop(fitView);
+  return renderGpx(fitView);
+}
+
+function renderLoop(fitView) {
+  setLine('track', null);
+  const start = S.loop ? S.loop.start : (S.start || S.here);
+  if (!S.loop) { setLine('route', null); setLine('guide', null); if (start) addMarker(start, '●', 'start'); return; }
+  const L = S.loop;
+  if (L.route) { setLine('route', L.route.shape); setLine('guide', null); }
+  else { setLine('route', null); setLine('guide', [L.start, ...L.points, L.start]); }
+  L.points.forEach((p, i) => addMarker(p, i + 1, '', null, np => dragLoopPoint(i, np)));
+  addMarker(L.start, '●', 'start');
+  $('sOut').classList.remove('hidden');
+  $('sStats').innerHTML = L.exact
+    ? `Vuelta de <b>${Math.round(L.km)} km</b> por carretera, hacia el ${G.compass(L.brg)} · ${L.points.length} puntos de paso.`
+    : `Vuelta de <b>~${L.target} km</b> hacia el ${G.compass(L.brg)} (aproximada) · ${L.points.length} puntos de paso.`;
+  $('sGo').href = loopUrl();
+  if (fitView) fit(L.route ? L.route.shape : [L.start, ...L.points]);
+}
+
+function renderGpx(fitView) {
+  setLine('guide', null);
+  if (!S.gpx) { setLine('track', null); setLine('route', null); return; }
+  setLine('track', S.gpx.pts);
+  if (!S.plan) { setLine('route', null); if (fitView) fit(S.gpx.pts); return; }
+  setLine('route', S.plan.route ? S.plan.route.shape : null);
+  addMarker(S.plan.start, '●', 'start');
+  const names = useNamesFor('gpx'); let n = 0, ni = 0;
   const legsBox = $('legs'); legsBox.innerHTML = '';
-  const names = useNamesFor('gpx'); let ni = 0;
-  S.route.legs.forEach((leg, li) => {
+  S.plan.legs.forEach((leg, li) => {
     const color = LEG_COLORS[li % LEG_COLORS.length];
-    leg.points.forEach((p, pi) => { n++; addMarker(p, n, '', color, np => { leg.points[pi] = np; S.towns = null; render(); }); });
+    leg.points.forEach((p, pi) => { n++; addMarker(p, n, '', color, np => dragTrackPoint(li, pi, np)); });
     const stops = names ? names.slice(ni, ni + leg.points.length) : leg.points; ni += leg.points.length;
+    const many = S.plan.legs.length > 1;
     const div = document.createElement('div'); div.className = 'leg';
-    const many = S.route.legs.length > 1;
     div.innerHTML = `<span class="dot" style="background:${color}"></span><div class="info"><div class="t">${many ? 'Tramo ' + (li + 1) : 'Ruta completa'}</div><div class="d">km ${leg.fromKm.toFixed(0)} → ${leg.toKm.toFixed(0)} · ${leg.points.length} puntos</div></div>`;
     const a = document.createElement('a'); a.href = G.mapsUrl(stops, gOpts()); a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'Abrir en Maps';
     div.append(a); legsBox.append(div);
   });
   $('gOut').classList.remove('hidden');
-  const nl = S.route.legs.length;
-  $('gStats').innerHTML = `<b>${S.gpx.name}</b> · ${S.route.total.toFixed(1)} km · ${n} puntos · ${nl === 1 ? '1 enlace' : nl + ' enlaces'}`
-    + (nl > 1 ? '<br>Consejo: haz que el cambio de enlace caiga en tu parada para comer.' : '');
+  const nl = S.plan.legs.length;
+  let html = `<b>${S.gpx.name}</b> · ${S.plan.total.toFixed(1)} km · ${n} puntos · ${nl === 1 ? '1 enlace' : nl + ' enlaces'}`;
+  if (S.plan.exact) {
+    const pct = Math.round(S.plan.pct * 100), cls = pct >= 95 ? 'good' : pct >= 85 ? 'mid' : 'bad';
+    html += `<br><span class="pct ${cls}">Coincidencia con tu ruta: ${pct}%</span>`;
+    if (pct < 95 && +segValue('linksSeg') < 3) html += '<br>Para más precisión, permite un enlace más (o arrastra el punto más cercano al tramo azul que se separa del rojo).';
+  } else html += '<br><span class="pct mid">Sin comprobar contra carreteras</span>';
+  if (nl > 1) html += '<br>Consejo: haz que el cambio de enlace caiga en tu parada para comer.';
+  $('gStats').innerHTML = html;
   if (fitView) fit(S.gpx.pts);
 }
 
@@ -266,25 +335,27 @@ document.querySelector('.tabs').addEventListener('click', e => { const b = e.tar
 bindSeg('kmSeg', () => { $('kmIn').value = ''; });
 $('kmIn').addEventListener('input', () => $('kmSeg').querySelectorAll('button').forEach(b => b.classList.remove('on')));
 bindSeg('dirSeg');
-bindSeg('modeSeg', buildRoute);
-bindSeg('perSeg', buildRoute);
-['sAvh', 'sAvt', 'gAvh', 'gAvt'].forEach(id => $(id).addEventListener('change', () => { store.set(id, $(id).checked); render(); }));
-$('useNames').addEventListener('change', render);
+bindSeg('linksSeg', buildPlan);
+bindSeg('perSeg', buildPlan);
+['sAvh', 'sAvt'].forEach(id => $(id).addEventListener('change', () => { store.set(id, $(id).checked); if (S.loop) generate(); }));
+['gAvh', 'gAvt'].forEach(id => $(id).addEventListener('change', () => { store.set(id, $(id).checked); buildPlan(); }));
+$('useNames').addEventListener('change', () => render());
 
-$('genBtn').onclick = regenerate;
-$('againBtn').onclick = regenerate;
+$('genBtn').onclick = generate;
+$('againBtn').onclick = generate;
 $('locateBtn').onclick = () => { S.start = null; locate().catch(() => {}); };
 $('sShare').onclick = async () => {
   const url = loopUrl();
   try {
-    if (navigator.share) await navigator.share({ title: 'Ruta en moto', text: `Vuelta de ~${S.loop.km} km`, url });
+    if (navigator.share) await navigator.share({ title: 'Ruta en moto', text: `Vuelta de ${Math.round(S.loop.km)} km`, url });
     else { await navigator.clipboard.writeText(url); toast('Enlace copiado'); }
   } catch { /* cancelado */ }
 };
 $('sTowns').onclick = () => showTowns('loop');
 $('gTowns').onclick = () => showTowns('gpx');
-$('sWpt').onclick = () => download(G.gpxWaypoints([S.loop.start, ...S.loop.points, S.loop.start], 'Sorpresa', ['Salida', ...S.loop.points.map(() => ''), 'Destino']), `sorpresa_${S.loop.km}km_puntos.gpx`);
-$('gWpt').onclick = () => { const p = [S.route.start, ...routeStops()]; download(G.gpxWaypoints(p, 'Ruta', ['Salida', ...p.slice(2).map(() => ''), 'Destino']), slug(S.gpx.name) + '_puntos.gpx'); };
+$('sWpt').onclick = () => download(G.gpxWaypoints([S.loop.start, ...S.loop.points, S.loop.start], 'Sorpresa', ['Salida', ...S.loop.points.map(() => ''), 'Destino']), `sorpresa_${Math.round(S.loop.km)}km_puntos.gpx`);
+$('sTrack').onclick = () => S.loop.route ? download(G.gpxTrack(S.loop.route.shape, `Sorpresa ${Math.round(S.loop.km)} km`), `sorpresa_${Math.round(S.loop.km)}km_track.gpx`) : toast('Primero genera una ruta comprobada');
+$('gWpt').onclick = () => { const p = [S.plan.start, ...planStops()]; download(G.gpxWaypoints(p, 'Ruta', ['Salida', ...p.slice(2).map(() => ''), 'Destino']), slug(S.gpx.name) + '_puntos.gpx'); };
 $('gTrack').onclick = () => download(G.gpxTrack(S.gpx.pts, S.gpx.name), slug(S.gpx.name) + '_track.gpx');
 $('copyTowns').onclick = async () => {
   if (!S.towns) return;

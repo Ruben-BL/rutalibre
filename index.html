@@ -42,6 +42,7 @@
     </div>
     <p class="hint" id="startHint">Salida: tu ubicación. También puedes <b>tocar el mapa</b> para elegir otro punto de salida.</p>
     <button class="big" id="genBtn">Generar ruta</button>
+    <p id="sProg" class="prog hidden"></p>
 
     <div id="sOut" class="out hidden">
       <p class="stats" id="sStats"></p>
@@ -50,10 +51,11 @@
         <button class="ghost" id="againBtn">Otra ruta</button>
         <button class="ghost" id="sShare">Compartir</button>
       </div>
-      <p class="hint">¿Algún punto en un sitio raro? <b>Arrástralo</b> en el mapa y el enlace se actualiza solo.</p>
+      <p class="hint">La línea azul es la ruta por carretera. ¿Quieres pasar por otro sitio? <b>Arrastra</b> un punto y se recalcula sola.</p>
       <details class="more">
         <summary>Para StreetCross y otros navegadores</summary>
         <button class="link" id="sTowns">Ver lista de pueblos</button>
+        <button class="link" id="sTrack">Descargar la ruta como track (.gpx): StreetCross lo importa, aunque no recalcula</button>
         <button class="link" id="sWpt">Descargar puntos (.gpx)</button>
       </details>
     </div>
@@ -66,10 +68,8 @@
       <span id="fname">De Wikiloc, gpx.studio… o arrástralo aquí</span>
       <input type="file" id="file" accept=".gpx,application/gpx+xml,application/xml,text/xml">
     </label>
-    <label class="lbl">Cómo repartir los puntos</label>
-    <div class="seg wrap" id="modeSeg">
-      <button data-v="one" class="on">Un solo enlace</button><button data-v="12">Baja</button><button data-v="7">Media</button><button data-v="4">Alta</button>
-    </div>
+    <label class="lbl">Enlaces de Google Maps (más enlaces = más fiel a tu ruta)</label>
+    <div class="seg" id="linksSeg"><button data-v="1" class="on">1 enlace</button><button data-v="2">2</button><button data-v="3">3</button></div>
     <label class="lbl">Puntos por enlace</label>
     <div class="seg" id="perSeg"><button data-v="9" class="on">9 (app de Maps)</button><button data-v="3">3 (navegador)</button></div>
     <div class="row checks">
@@ -77,10 +77,11 @@
       <label><input type="checkbox" id="gAvt"> Evitar peajes</label>
     </div>
 
+    <p id="gProg" class="prog hidden"></p>
     <div id="gOut" class="out hidden">
       <p class="stats" id="gStats"></p>
       <div id="legs"></div>
-      <p class="hint">Compara la ruta que te enseña Maps con la tuya antes de salir. Si se desvía en algún tramo, <b>arrastra</b> el punto más cercano sobre la carretera que quieres.</p>
+      <p class="hint"><span class="sw red"></span> tu ruta · <span class="sw blue"></span> por donde irá el navegador. Si en algún tramo se separan, <b>arrastra</b> el punto más cercano sobre la carretera roja.</p>
       <details class="more">
         <summary>Para StreetCross y otros navegadores</summary>
         <button class="link" id="gTowns">Ver lista de pueblos</button>
@@ -103,9 +104,9 @@
     <details>
       <summary>Cómo funciona</summary>
       <p>Google Maps no sigue líneas dibujadas: va de punto en punto. RutaLibre elige los puntos (hasta 10 por enlace, el máximo de Maps) para que siga tu ruta. Si te pasas una salida, Maps recalcula hacia el siguiente punto, y te avisa de radares.</p>
-      <p>En «Ruta sorpresa» los km son aproximados: la distancia exacta te la da Maps antes de arrancar.</p>
+      <p>Para elegirlos, RutaLibre calcula la ruta con un motor de rutas libre (<a href="https://valhalla.github.io/valhalla/" target="_blank" rel="noopener">Valhalla</a>), la compara con tu track y añade puntos donde se separa. Los puntos se colocan siempre sobre carreteras: nada de pistas, caminos ni parkings. Google puede elegir alguna carretera distinta a Valhalla, así que échale un vistazo en Maps antes de salir.</p>
     </details>
-    <p>Software libre (GPL-3.0) · Mapa © <a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a>, datos © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> · Pueblos: <a href="https://nominatim.org" target="_blank" rel="noopener">Nominatim</a></p>
+    <p>Software libre (GPL-3.0) · Mapa © <a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a>, datos © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> · Rutas: <a href="https://valhalla.openstreetmap.de" target="_blank" rel="noopener">Valhalla (FOSSGIS)</a> · Pueblos: <a href="https://nominatim.org" target="_blank" rel="noopener">Nominatim</a></p>
   </footer>
 </main>
 
