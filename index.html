@@ -25,6 +25,7 @@
   <nav class="tabs" role="tablist">
     <button role="tab" data-tab="sorpresa" class="on">Ruta sorpresa</button>
     <button role="tab" data-tab="gpx">Desde un GPX</button>
+    <button role="tab" data-tab="comunidad">Comunidad</button>
   </nav>
 
   <!-- ===================== RUTA SORPRESA ===================== -->
@@ -36,6 +37,8 @@
     </div>
     <label class="lbl">Hacia dónde</label>
     <div class="seg wrap" id="dirSeg"><button data-v="-1" class="on">Sorpréndeme</button><button data-v="0">N</button><button data-v="90">E</button><button data-v="180">S</button><button data-v="270">O</button></div>
+    <label class="lbl">Curvas</label>
+    <div class="seg" id="curveSeg"><button data-v="0">Normal</button><button data-v="1" class="on">Muchas curvas 🌀</button></div>
     <div class="row checks">
       <label><input type="checkbox" id="sAvh" checked> Evitar autopistas</label>
       <label><input type="checkbox" id="sAvt" checked> Evitar peajes</label>
@@ -91,6 +94,16 @@
     </div>
   </section>
 
+  <!-- ===================== COMUNIDAD ===================== -->
+  <section id="tab-comunidad" class="hidden">
+    <p class="hint" style="margin-top:0">Rutas compartidas por otros moteros. Ábrelas y RutaLibre las prepara para Google Maps como cualquier GPX.</p>
+    <input id="commSearch" class="txt" style="width:100%" type="search" placeholder="Buscar por nombre o zona…">
+    <p id="commMsg" class="hint"></p>
+    <div id="commList"></div>
+    <a class="ghost" id="proposeBtn" target="_blank" rel="noopener" style="display:block;text-align:center;text-decoration:none;color:var(--tx)">➕ Proponer una ruta</a>
+    <p class="hint">Se propone desde GitHub (hace falta una cuenta gratuita). Solo rutas tuyas o con permiso de su autor; se comparten con licencia CC BY-SA 4.0.</p>
+  </section>
+
   <!-- lista de pueblos (compartida) -->
   <div id="towns" class="out hidden">
     <p class="lbl">Puntos de paso, en orden</p>
@@ -104,9 +117,10 @@
     <details>
       <summary>Cómo funciona</summary>
       <p>Google Maps no sigue líneas dibujadas: va de punto en punto. RutaLibre elige los puntos (hasta 10 por enlace, el máximo de Maps) para que siga tu ruta. Si te pasas una salida, Maps recalcula hacia el siguiente punto, y te avisa de radares.</p>
+      <p>Con «Muchas curvas», RutaLibre descarga las carreteras de la zona desde OpenStreetMap, mide lo reviradas que son (método del proyecto libre <a href="https://roadcurvature.com" target="_blank" rel="noopener">curvature</a>) y hace pasar la vuelta por los tramos con más curvas. En el mapa salen en amarillo.</p>
       <p>Para elegirlos, RutaLibre calcula la ruta con un motor de rutas libre (<a href="https://valhalla.github.io/valhalla/" target="_blank" rel="noopener">Valhalla</a>), la compara con tu track y añade puntos donde se separa. Los puntos se colocan siempre sobre carreteras: nada de pistas, caminos ni parkings. Google puede elegir alguna carretera distinta a Valhalla, así que échale un vistazo en Maps antes de salir.</p>
     </details>
-    <p>Software libre (GPL-3.0) · Mapa © <a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a>, datos © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> · Rutas: <a href="https://valhalla.openstreetmap.de" target="_blank" rel="noopener">Valhalla (FOSSGIS)</a> · Pueblos: <a href="https://nominatim.org" target="_blank" rel="noopener">Nominatim</a></p>
+    <p>Software libre (GPL-3.0) · Mapa © <a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a>, datos © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> · Carreteras: <a href="https://overpass-api.de" target="_blank" rel="noopener">Overpass</a> · Rutas: <a href="https://valhalla.openstreetmap.de" target="_blank" rel="noopener">Valhalla (FOSSGIS)</a> · Pueblos: <a href="https://nominatim.org" target="_blank" rel="noopener">Nominatim</a></p>
   </footer>
 </main>
 

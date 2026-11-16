@@ -3,6 +3,8 @@
 import * as G from './geo.js';
 import { Router, DEFAULT_ROUTER } from './router.js';
 import * as P from './planner.js';
+import { DEFAULT_OVERPASS, curvyShare } from './curves.js';
+const curvyShareOf = (shape, lines) => curvyShare(shape, lines.map(pts => ({ pts })));
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -18,6 +20,9 @@ const store = {
 // Motor de rutas: ?router=URL lo cambia y se recuerda; ?router=default vuelve al público.
 if (params.get('router')) store.set('router', params.get('router') === 'default' ? null : params.get('router'));
 const router = new Router(store.get('router', null) || DEFAULT_ROUTER);
+// Servidor de Overpass (carreteras de OpenStreetMap), igual: ?overpass=URL
+if (params.get('overpass')) store.set('overpass', params.get('overpass') === 'default' ? null : params.get('overpass'));
+const OVERPASS = store.get('overpass', null) || DEFAULT_OVERPASS;
 
 // ---------------- estado ----------------
 const S = {
@@ -69,8 +74,9 @@ function initMap() {
   map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
   map.on('load', () => {
     mapReady = true;
-    for (const id of ['track', 'route', 'guide']) map.addSource(id, { type: 'geojson', data: emptyFC() });
+    for (const id of ['curvy', 'track', 'route', 'guide']) map.addSource(id, { type: 'geojson', data: emptyFC() });
     const round = { 'line-join': 'round', 'line-cap': 'round' };
+    map.addLayer({ id: 'curvy', type: 'line', source: 'curvy', layout: round, paint: { 'line-color': '#f5b83d', 'line-width': 5, 'line-opacity': .45 } });
     map.addLayer({ id: 'track', type: 'line', source: 'track', layout: round, paint: { 'line-color': '#d7263d', 'line-width': 6, 'line-opacity': .55 } });
     map.addLayer({ id: 'route', type: 'line', source: 'route', layout: round, paint: { 'line-color': '#1e6bff', 'line-width': 3.5, 'line-opacity': .95 } });
     map.addLayer({ id: 'guide', type: 'line', source: 'guide', paint: { 'line-color': '#ff5a36', 'line-width': 3, 'line-dasharray': [2, 2] } });
@@ -80,15 +86,24 @@ function initMap() {
     if (S.tab !== 'sorpresa') return;
     S.start = [e.lngLat.lat, e.lngLat.lng];
     $('startHint').innerHTML = 'Salida: <b>el punto que has tocado</b>. <a href="#" id="useHere">Volver a mi ubicación</a>';
-    $('useHere').onclick = ev => { ev.preventDefault(); S.start = null; $('startHint').innerHTML = HINT_START; render(); };
-    if (S.loop) generate(); else render();
-    toast('Salida fijada aquí');
+    $('useHere').onclick = ev => { ev.preventDefault(); backToHere(); };
+    render();
+    toast(S.loop ? 'Nueva salida fijada. Pulsa «Generar ruta» para crear la vuelta desde aquí.' : 'Salida fijada aquí', 3500);
   });
+}
+/** Olvida la salida elegida en el mapa y vuelve a leer dónde estás de verdad. */
+function backToHere() {
+  S.start = null; $('startHint').innerHTML = HINT_START; render();
+  locate(false, true).catch(() => {});
 }
 const HINT_START = 'Salida: tu ubicación. También puedes <b>tocar el mapa</b> para elegir otro punto de salida.';
 function mapFail(msg) { const m = $('mapMsg'); m.textContent = msg; m.classList.remove('hidden'); }
 const emptyFC = () => ({ type: 'FeatureCollection', features: [] });
 const lineFC = coords => ({ type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords.map(p => [p[1], p[0]]) } }] });
+function setMulti(id, lines) {
+  if (!mapReady) return;
+  map.getSource(id).setData(lines && lines.length ? { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'MultiLineString', coordinates: lines.map(l => l.map(p => [p[1], p[0]])) } }] } : emptyFC());
+}
 function setLine(id, coords) { if (mapReady) map.getSource(id).setData(coords && coords.length > 1 ? lineFC(thin(coords)) : emptyFC()); }
 const thin = c => { const step = Math.max(1, Math.floor(c.length / 4000)); return c.filter((_, i) => i % step === 0 || i === c.length - 1); };
 
@@ -111,15 +126,15 @@ function fit(points) {
 }
 
 // ---------------- ubicación ----------------
-function locate(silent) {
+function locate(silent, fly = false) {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) return reject(new Error('Sin geolocalización'));
     navigator.geolocation.getCurrentPosition(pos => {
       S.here = [pos.coords.latitude, pos.coords.longitude];
-      if (mapReady && !S.loop && !S.gpx) map.flyTo({ center: [S.here[1], S.here[0]], zoom: 11 });
+      if (mapReady && (fly || (!S.loop && !S.gpx))) map.flyTo({ center: [S.here[1], S.here[0]], zoom: 11 });
       render(); resolve(S.here);
     }, err => { if (!silent) toast('No puedo leer tu ubicación. Toca el mapa para elegir la salida.', 4000); reject(err); },
-    { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 });
+    { enableHighAccuracy: true, timeout: 12000, maximumAge: fly ? 0 : 60000 });
   });
 }
 
@@ -139,7 +154,13 @@ async function generate() {
   $('genBtn').disabled = $('againBtn').disabled = true;
   S.towns = null; $('towns').classList.add('hidden'); store.set('km', km);
   try {
-    const plan = await P.planSurprise(start, km, dir, sOpts(), router, m => my === S.busy && busy($('sProg'), m));
+    const prog = m => my === S.busy && busy($('sProg'), m);
+    let plan;
+    if (segValue('curveSeg') === '1') {
+      try { plan = await P.planSurpriseCurvy(start, km, dir, sOpts(), router, { overpass: OVERPASS }, prog); }
+      catch (e) { console.warn(e); toast('No he podido descargar las carreteras de la zona: ruta sin buscar curvas.', 4000); }
+    }
+    if (!plan) plan = await P.planSurprise(start, km, dir, sOpts(), router, prog);
     if (my !== S.busy) return;
     S.loop = { ...plan, exact: true };
   } catch (e) {
@@ -147,7 +168,7 @@ async function generate() {
     console.warn(e);
     const r = G.surpriseLoop(start, km, dir);
     S.loop = { start, points: r.points, brg: r.brg, km, target: km, exact: false };
-    toast('El motor de rutas no responde: ruta aproximada, sin comprobar carreteras.', 4500);
+    toast(`No he podido calcular la ruta por carretera (${e.message}). Te dejo una aproximada.`, 6000);
   } finally {
     if (my === S.busy) { busy($('sProg'), ''); $('genBtn').disabled = $('againBtn').disabled = false; }
   }
@@ -163,6 +184,7 @@ async function dragLoopPoint(i, p) {
     r = await P.fixSpurs(S.loop.start, r.stops, r, sOpts(), router, () => {});
     if (my !== S.busy) return;
     S.loop = { ...S.loop, points: r.points, route: r, km: r.km };
+    if (S.loop.stretches) S.loop.curvy = curvyShareOf(r.shape, S.loop.stretches);
   } catch (e) { toast('No hay carretera ahí. Prueba en otro sitio.'); }
   finally { if (my === S.busy) busy($('sProg'), ''); }
   render();
@@ -184,7 +206,7 @@ async function buildPlan() {
     if (my !== S.busy) return;
     console.warn(e);
     S.plan = { ...G.routeFromTrack(S.gpx.pts, { mode: maxLinks === 1 ? 'one' : 'legs', kmPer: 7, per }), exact: false };
-    toast('El motor de rutas no responde: puntos sin comprobar (como en la versión anterior).', 4500);
+    toast(`No he podido comprobar la ruta (${e.message}). Te dejo los puntos sin comprobar.`, 6000);
   } finally { if (my === S.busy) busy($('gProg'), ''); }
   render(true);
 }
@@ -206,20 +228,74 @@ async function dragTrackPoint(li, pi, p) {
   render();
 }
 
+function loadText(text, filename, title) {
+  try {
+    const g = G.parseGpx(text);
+    S.gpx = { name: title || g.name || filename.replace(/\.gpx$/i, ''), pts: g.pts };
+    S.plan = null;
+    $('drop').classList.add('has'); $('fname').textContent = filename;
+    render(true);
+    buildPlan();
+  } catch (e) { toast(e.message, 4000); }
+}
 function loadFile(file) {
   if (!file) return;
   const rd = new FileReader();
-  rd.onload = () => {
-    try {
-      const g = G.parseGpx(rd.result);
-      S.gpx = { name: g.name || file.name.replace(/\.gpx$/i, ''), pts: g.pts };
-      S.plan = null;
-      $('drop').classList.add('has'); $('fname').textContent = file.name;
-      render(true);
-      buildPlan();
-    } catch (e) { toast(e.message, 4000); }
-  };
+  rd.onload = () => loadText(rd.result, file.name);
   rd.readAsText(file);
+}
+
+// ================= COMUNIDAD =================
+// Las rutas viven en el propio repositorio: rutas/index.json + un .gpx por ruta.
+function repoSlug() {
+  const h = location.hostname;
+  if (h.endsWith('.github.io')) return `${h.split('.')[0]}/${location.pathname.split('/')[1] || h}`;
+  return 'Ruben-BL/rutalibre';
+}
+let community = null;
+async function loadCommunity() {
+  if (community) return render(true);
+  $('commMsg').textContent = 'Cargando rutas…';
+  try {
+    const res = await fetch('rutas/index.json', { cache: 'no-cache' });
+    community = res.ok ? await res.json() : [];
+  } catch { community = []; }
+  if (S.tab === 'comunidad') render(true);
+}
+function communityFiltered() {
+  const q = $('commSearch').value.trim().toLowerCase();
+  const norm = t => (t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const list = (community || []).filter(r => !q || norm(`${r.nombre} ${r.zona} ${r.autor}`).includes(norm(q)));
+  if (S.here) list.forEach(r => { r._dist = r.inicio ? G.haversine(S.here, r.inicio) / 1000 : Infinity; });
+  return S.here ? list.sort((a, b) => a._dist - b._dist) : list;
+}
+function renderCommunity(fitView) {
+  setLine('track', null); setLine('route', null); setLine('guide', null); setMulti('curvy', null);
+  const list = communityFiltered(), box = $('commList'); box.innerHTML = '';
+  $('commMsg').textContent = !community ? '' : !community.length
+    ? 'Todavía no hay rutas. ¡Sé el primero en proponer una!'
+    : !list.length ? 'Ninguna ruta coincide con la búsqueda.' : `${list.length} ${list.length === 1 ? 'ruta' : 'rutas'}${S.here ? ', las más cercanas primero' : ''}.`;
+  list.forEach((r, i) => {
+    const div = document.createElement('div'); div.className = 'croute';
+    const dist = r._dist != null && isFinite(r._dist) ? ` · a ${Math.round(r._dist)} km de ti` : '';
+    div.innerHTML = `<span class="n">${i + 1}</span><div class="info"><div class="t"></div><div class="m"></div><div class="d"></div></div>`;
+    div.querySelector('.t').textContent = r.nombre;
+    div.querySelector('.m').textContent = `${r.zona} · ${r.km} km${dist}${r.autor ? ' · por ' + r.autor : ''}`;
+    div.querySelector('.d').textContent = r.descripcion || '';
+    const b = document.createElement('button'); b.textContent = 'Abrir'; b.onclick = () => openCommunity(r);
+    div.append(b); box.append(div);
+    if (r.inicio) addMarker(r.inicio, i + 1, 'comm');
+  });
+  if (fitView && list.length) fit(list.filter(r => r.inicio).map(r => r.inicio));
+}
+async function openCommunity(r) {
+  try {
+    const res = await fetch(r.archivo);
+    if (!res.ok) throw new Error('No encuentro el archivo de la ruta');
+    const text = await res.text();
+    switchTab('gpx');
+    loadText(text, r.archivo.split('/').pop(), r.nombre);
+  } catch (e) { toast(e.message, 4000); }
 }
 const planStops = () => S.plan.legs.flatMap(l => l.points);
 
@@ -269,28 +345,35 @@ function useNamesFor(kind) {
 function render(fitView) {
   clearMarkers();
   if (S.tab === 'sorpresa') return renderLoop(fitView);
+  if (S.tab === 'comunidad') return renderCommunity(fitView);
   return renderGpx(fitView);
 }
 
 function renderLoop(fitView) {
   setLine('track', null);
-  const start = S.loop ? S.loop.start : (S.start || S.here);
+  const start = S.start || (S.loop ? S.loop.start : S.here);
+  setMulti('curvy', S.loop && S.loop.stretches);
   if (!S.loop) { setLine('route', null); setLine('guide', null); if (start) addMarker(start, '●', 'start'); return; }
   const L = S.loop;
+  const moved = G.haversine(start, L.start) > 50;   // salida cambiada después de generar
   if (L.route) { setLine('route', L.route.shape); setLine('guide', null); }
   else { setLine('route', null); setLine('guide', [L.start, ...L.points, L.start]); }
   L.points.forEach((p, i) => addMarker(p, i + 1, '', null, np => dragLoopPoint(i, np)));
-  addMarker(L.start, '●', 'start');
+  addMarker(start, '●', 'start');
   $('sOut').classList.remove('hidden');
   $('sStats').innerHTML = L.exact
     ? `Vuelta de <b>${Math.round(L.km)} km</b> por carretera, hacia el ${G.compass(L.brg)} · ${L.points.length} puntos de paso.`
+      + (L.curvy == null ? '' : L.curvy < 0.03
+        ? '<br>🌀 Por esta zona no he encontrado carreteras reviradas.'
+        : `<br>🌀 <b>${Math.round(L.curvy * 100)}%</b> en carretera revirada${L.roads && L.roads.length ? ' · pasa por ' + L.roads.slice(0, 4).join(', ') : ''}.`)
     : `Vuelta de <b>~${L.target} km</b> hacia el ${G.compass(L.brg)} (aproximada) · ${L.points.length} puntos de paso.`;
+  if (moved) $('sStats').innerHTML += '<br><b>Has cambiado la salida:</b> pulsa «Generar ruta» para crear una vuelta desde allí.';
   $('sGo').href = loopUrl();
   if (fitView) fit(L.route ? L.route.shape : [L.start, ...L.points]);
 }
 
 function renderGpx(fitView) {
-  setLine('guide', null);
+  setLine('guide', null); setMulti('curvy', null);
   if (!S.gpx) { setLine('track', null); setLine('route', null); return; }
   setLine('track', S.gpx.pts);
   if (!S.plan) { setLine('route', null); if (fitView) fit(S.gpx.pts); return; }
@@ -327,7 +410,9 @@ function switchTab(t) {
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
   $('tab-sorpresa').classList.toggle('hidden', t !== 'sorpresa');
   $('tab-gpx').classList.toggle('hidden', t !== 'gpx');
+  $('tab-comunidad').classList.toggle('hidden', t !== 'comunidad');
   $('towns').classList.add('hidden');
+  if (t === 'comunidad') loadCommunity();
   render(true);
 }
 document.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b) switchTab(b.dataset.tab); });
@@ -335,6 +420,7 @@ document.querySelector('.tabs').addEventListener('click', e => { const b = e.tar
 bindSeg('kmSeg', () => { $('kmIn').value = ''; });
 $('kmIn').addEventListener('input', () => $('kmSeg').querySelectorAll('button').forEach(b => b.classList.remove('on')));
 bindSeg('dirSeg');
+bindSeg('curveSeg', v => store.set('curvy', v));
 bindSeg('linksSeg', buildPlan);
 bindSeg('perSeg', buildPlan);
 ['sAvh', 'sAvt'].forEach(id => $(id).addEventListener('change', () => { store.set(id, $(id).checked); if (S.loop) generate(); }));
@@ -343,7 +429,7 @@ $('useNames').addEventListener('change', () => render());
 
 $('genBtn').onclick = generate;
 $('againBtn').onclick = generate;
-$('locateBtn').onclick = () => { S.start = null; locate().catch(() => {}); };
+$('locateBtn').onclick = backToHere;
 $('sShare').onclick = async () => {
   const url = loopUrl();
   try {
@@ -364,12 +450,16 @@ $('copyTowns').onclick = async () => {
 };
 
 $('file').addEventListener('change', e => loadFile(e.target.files[0]));
+$('commSearch').addEventListener('input', () => render());
+$('proposeBtn').href = `https://github.com/${repoSlug()}/issues/new?template=nueva-ruta.yml`;
 const drop = $('drop');
 ['dragover', 'dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('has'); }));
 drop.addEventListener('drop', e => { e.preventDefault(); loadFile(e.dataTransfer.files[0]); });
 
 // preferencias guardadas en este dispositivo
 ['sAvh', 'sAvt', 'gAvh', 'gAvt'].forEach(id => { const v = store.get(id, null); if (v !== null) $(id).checked = v; });
+const savedCurvy = store.get('curvy', null);
+if (savedCurvy !== null) $('curveSeg').querySelectorAll('button').forEach(x => x.classList.toggle('on', x.dataset.v === savedCurvy));
 const savedKm = store.get('km', null);
 if (savedKm) {
   const b = $('kmSeg').querySelector(`[data-v="${savedKm}"]`);

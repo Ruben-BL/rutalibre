@@ -96,3 +96,14 @@ button:disabled{opacity:.5;cursor:wait}
 .pct.good{color:var(--ok)} .pct.mid{color:#f5b83d} .pct.bad{color:#ff6b6b}
 .sw{display:inline-block;width:18px;height:4px;border-radius:2px;vertical-align:middle}
 .sw.red{background:#d7263d} .sw.blue{background:#1e6bff}
+
+/* fase 3b: comunidad */
+.tabs button{padding:12px 6px;font-size:14px}
+.croute{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;margin-top:10px;display:flex;gap:12px;align-items:flex-start}
+.croute .n{width:26px;height:26px;border-radius:50%;background:var(--blue);color:#fff;font:700 12px/26px system-ui;text-align:center;flex:none}
+.croute .info{flex:1;min-width:0}
+.croute .t{font-weight:700}
+.croute .m{color:var(--mut);font-size:13px}
+.croute .d{font-size:14px;margin-top:4px}
+.croute button{background:var(--acc);color:#fff;border:0;border-radius:10px;padding:10px 12px;font-weight:700;cursor:pointer;white-space:nowrap}
+.mk.comm{background:var(--blue)}

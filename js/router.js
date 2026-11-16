@@ -37,7 +37,13 @@ export class Router {
       this.last = Date.now();
       // GET con ?json=… (como hace openstreetmap.org): es una petición "simple" para el navegador,
       // sin consulta previa CORS, y funciona con cualquier servidor Valhalla.
-      const res = await this.fetch(`${this.base}/${action}?json=${encodeURIComponent(JSON.stringify(body))}`);
+      const url = `${this.base}/${action}?json=${encodeURIComponent(JSON.stringify(body))}`;
+      let res;
+      try {
+        res = await this.fetch(url);
+        if (res.status === 429) { await new Promise(r => setTimeout(r, 2500)); this.last = Date.now(); res = await this.fetch(url); } // límite de peticiones: esperar y reintentar una vez
+      } catch (e) { const err = new Error('No hay conexión con el motor de rutas'); err.network = true; throw err; }
+      if (res.status === 429 || res.status >= 500 && res.status !== 500) { const err = new Error(`El motor de rutas está saturado (${res.status})`); err.network = true; throw err; }
       const j = await res.json().catch(() => ({}));
       if (!res.ok) { const e = new Error(j.error || `Error ${res.status} del motor de rutas`); e.code = j.error_code; throw e; }
       return j;
@@ -59,7 +65,21 @@ export class Router {
    * así se ven los "pinchos" de ida y vuelta.
    * Devuelve { km, legs: [{ km, shape:[[lat,lon]...] }], shape }.
    */
-  async route(points, opts = {}, { minClass = null, radius = 0 } = {}) {
+  async route(points, opts = {}, snap = {}) {
+    // Los servidores limitan los puntos por petición: las rutas muy largas se piden por trozos.
+    const MAX = 20;
+    if (points.length <= MAX) return this._route(points, opts, snap);
+    const parts = [];
+    for (let i = 0; i < points.length - 1; i += MAX - 1) parts.push(await this._route(points.slice(i, i + MAX), opts, snap));
+    const legs = parts.flatMap(p => p.legs);
+    return {
+      km: parts.reduce((s, p) => s + p.km, 0), legs,
+      shape: legs.flatMap((l, i) => i ? l.shape.slice(1) : l.shape),
+      stops: legs.slice(0, -1).map(l => l.shape[l.shape.length - 1]),
+    };
+  }
+
+  async _route(points, opts = {}, { minClass = null, radius = 0 } = {}) {
     const filter = minClass ? { min_road_class: minClass, exclude_ramp: true } : undefined;
     const j = await this._post('route', {
       locations: points.map((p, i) => ({

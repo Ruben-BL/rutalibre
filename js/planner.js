@@ -2,6 +2,7 @@
 // Usa el motor de rutas (Valhalla) para que los puntos caigan en carreteras reales,
 // medir los km de verdad y comprobar que la ruta sigue a tu track.
 import * as G from './geo.js';
+import * as C from './curves.js';
 
 // Ida y vuelta repetida (km) a partir de la cual una parada se considera "pincho".
 const SPUR_KM = 0.1;        // ruta sorpresa
@@ -71,7 +72,20 @@ export async function planTrack(track, { maxLinks = 1, per = 9, target = 0.97, .
   let idx = initialMidpoints(track, cum, n0);
   // Cada punto se ajusta a la carretera dentro de la propia petición de ruta
   // (nada de caminos de servicio ni parkings: clase "residential" o superior).
-  const route = () => router.route([track[0], ...idx.map(i => track[i]), track[end]], opts, { minClass: 'residential', radius: 60 });
+  const attempt = (ix, strict = true) => router.route([track[0], ...ix.map(i => track[i]), track[end]], opts,
+    strict ? { minClass: 'residential', radius: 60 } : {});
+  const banned = [];                                      // km de puntos que no llevan a ninguna carretera útil
+  // Si algún punto cae donde el motor no encuentra carretera (o queda aislado), se prueba sin
+  // la restricción de clase de vía y, si aun así falla, quitando los puntos de uno en uno.
+  async function route() {
+    try { return await attempt(idx); } catch (e) { if (!retryable(e)) throw e; }
+    try { return await attempt(idx, false); } catch (e) { if (!retryable(e)) throw e; }
+    for (let k = idx.length - 1; k >= 0; k--) {
+      const ix = idx.filter((_, i) => i !== k);
+      try { const r = await attempt(ix); banned.push(cum[idx[k]]); idx = ix; return r; } catch (e) { if (!retryable(e)) throw e; }
+    }
+    throw new Error('El motor de rutas no encuentra carreteras para este track.');
+  }
 
   let best = null;
   const tried = new Map();                                // km de hueco → veces probado
@@ -79,7 +93,8 @@ export async function planTrack(track, { maxLinks = 1, per = 9, target = 0.97, .
   const maxIt = budget - idx.length + 8;
   for (let it = 0; it < maxIt; it++) {
     progress(`Comprobando la ruta… (${idx.length} puntos)`);
-    const r = await route();
+    let r;
+    try { r = await route(); } catch (e) { if (best) break; throw e; }
     const cmp = G.compareRoute(track, r.shape);
     progress(`Coincidencia ${Math.round(cmp.pct * 100)}% (${idx.length} puntos)`);
 
@@ -93,7 +108,8 @@ export async function planTrack(track, { maxLinks = 1, per = 9, target = 0.97, .
     }
     if (!best || cmp.pct > best.cmp.pct) best = { idx: idx.slice(), r, cmp };
     if (cmp.pct >= target || !cmp.gaps.length) break;
-    const gap = cmp.gaps.find(g => (tried.get(Math.round(g.fromKm)) || 0) < 2 && !idx.some(i => Math.abs(cum[i] - cum[g.mid]) < 300));
+    const gap = cmp.gaps.find(g => (tried.get(Math.round(g.fromKm)) || 0) < 2
+      && !idx.some(i => Math.abs(cum[i] - cum[g.mid]) < 300) && !banned.some(m => Math.abs(m - cum[g.mid]) < 500));
     if (!gap) break;
     tried.set(Math.round(gap.fromKm), (tried.get(Math.round(gap.fromKm)) || 0) + 1);
     if (idx.length >= budget) {
@@ -115,6 +131,9 @@ export async function planTrack(track, { maxLinks = 1, per = 9, target = 0.97, .
   const stopKm = [...idx.map(i => cum[i] / 1000), totalKm];
   return { total: totalKm, start: track[0].slice(), legs: splitLegs(stops, stopKm, per), route: r, pct: cmp.pct, gaps: cmp.gaps, km: r.km };
 }
+
+/** Errores del motor que dependen de dónde caen los puntos (merece la pena reintentar). */
+function retryable(e) { return !e.network; }
 
 function splitLegs(stops, stopKm, per) {
   const legs = [];
@@ -149,4 +168,96 @@ function dedupe(pts, minM) {
   const out = [];
   for (const p of pts) if (!out.length || G.haversine(out[out.length - 1], p) >= minM) out.push(p);
   return out;
+}
+
+// ================= FASE 3a: ruta sorpresa con curvas =================
+
+const roadCache = new Map();
+/** Carreteras reviradas alrededor de un punto (se guardan para no volver a descargarlas). */
+export async function curvyAround(center, radiusM, overpass, progress = () => {}, curvyOpts = {}) {
+  const bbox = C.bboxAround(center, radiusM), key = bbox.map(v => v.toFixed(2)).join(',');
+  if (!roadCache.has(key)) {
+    progress('Buscando carreteras reviradas…');
+    const ways = await C.fetchRoads(bbox, overpass);
+    roadCache.set(key, C.curvyStretches(C.mergeRoads(ways), curvyOpts));
+  }
+  return roadCache.get(key);
+}
+
+/**
+ * Ruta sorpresa que busca curvas: divide la vuelta en sectores y en cada uno elige el tramo
+ * más revirado que pille de camino. Cada tramo entra con dos puntos (al 20% y al 80%)
+ * para obligar a recorrerlo entero, en el sentido de la vuelta.
+ */
+export async function planSurpriseCurvy(start, km, dir, opts, router, { overpass, rand = Math.random, curvyOpts } = {}, progress = () => {}) {
+  const P = G.loopParams(dir, { rand });
+  const n = km < 70 ? 3 : 4;                       // tramos revirados (2 puntos cada uno)
+  const ROAD = 1.35;
+  let scale = 1, best = null, stretches = null, fetchedFor = null;
+
+  for (let it = 0; it < 3; it++) {
+    const R = km * 1000 / (2 * Math.PI * ROAD) * scale;
+    const center = G.destPoint(start, P.brg, R);
+    if (!stretches || G.haversine(center, fetchedFor.c) > 0.35 * fetchedFor.R) {
+      stretches = await curvyAround(center, 1.6 * R, overpass, progress, curvyOpts);
+      fetchedFor = { c: center, R };
+    }
+    progress(it === 0 ? 'Eligiendo los tramos con más curvas…' : 'Ajustando los kilómetros…');
+    const back = (P.brg + 180) % 360, used = new Set(), wps = [];
+    let prev = start;
+    for (let i = 1; i <= n; i++) {
+      const target = back + P.sense * 360 * i / (n + 1), half = 180 / (n + 1);
+      let pick = null, pickScore = -1;
+      for (const [k, s] of stretches.entries()) {
+        if (used.has(k)) continue;
+        const d = G.haversine(center, s.mid);
+        if (d < 0.45 * R || d > 1.6 * R) continue;
+        const ang = bearing(center, s.mid), off = Math.abs(((ang - target + 540) % 360) - 180);
+        if (off > half) continue;
+        const score = s.curv * (0.7 + 0.6 * rand()) * (1 - 0.5 * Math.abs(d - R) / R);
+        if (score > pickScore) { pickScore = score; pick = k; }
+      }
+      if (pick == null) { const g = G.destPoint(center, target, R); wps.push({ geo: g }); prev = g; continue; }
+      used.add(pick);
+      const s = stretches[pick];
+      let a = C.pointAt(s.pts, 0.2), b = C.pointAt(s.pts, 0.8);
+      if (G.haversine(prev, a) > G.haversine(prev, b)) [a, b] = [b, a];
+      wps.push({ pair: [a, b] }); prev = b;
+    }
+    // los sectores sin tramo revirado usan un punto normal, ajustado a carretera (o se quitan si cae en el mar)
+    const geo = wps.filter(w => w.geo);
+    if (geo.length) {
+      const sn = await router.snap(geo.map(w => w.geo), { minClass: 'tertiary' }, opts);
+      geo.forEach((w, k) => { w.snapped = sn[k]; });
+    }
+    const groups = wps.map(w => (w.geo ? (w.snapped ? [w.snapped] : null) : w.pair)).filter(Boolean);
+    let r = await routeGroups(start, groups, opts, router);
+    r = await fixSpurs(start, r.stops, r, opts, router, progress);
+    const cand = {
+      start, points: r.points, route: r, km: r.km, brg: P.brg, target: km,
+      curvy: C.curvyShare(r.shape, stretches), roads: [...new Set([...used].map(k => stretches[k].name).filter(Boolean))],
+      stretches: stretches.map(x => x.pts),
+    };
+    if (!best || Math.abs(cand.km - km) < Math.abs(best.km - km)) best = cand;
+    if (Math.abs(r.km - km) / km < 0.15) break;
+    scale *= Math.max(0.5, Math.min(1.8, km / r.km));
+  }
+  return best;
+}
+/**
+ * Ruta por grupos de puntos (un tramo revirado = 2 puntos). Si alguna carretera queda aislada
+ * y no hay forma de llegar, se prueba quitando un grupo cada vez.
+ */
+async function routeGroups(start, groups, opts, router) {
+  const go = gs => router.route([start, ...gs.flat(), start], opts, { minClass: 'tertiary' });
+  try { return await go(groups); } catch (e) { if (groups.length < 2) throw e; }
+  for (let k = groups.length - 1; k >= 0; k--) {
+    try { return await go(groups.filter((_, i) => i !== k)); } catch { /* probar el siguiente */ }
+  }
+  throw new Error('No encuentro una vuelta por carretera desde aquí.');
+}
+function bearing(a, b) {
+  const r = Math.PI / 180, y = Math.sin((b[1] - a[1]) * r) * Math.cos(b[0] * r);
+  const x = Math.cos(a[0] * r) * Math.sin(b[0] * r) - Math.sin(a[0] * r) * Math.cos(b[0] * r) * Math.cos((b[1] - a[1]) * r);
+  return (Math.atan2(y, x) / r + 360) % 360;
 }

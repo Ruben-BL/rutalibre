@@ -1,0 +1,50 @@
+name: 🏍️ Proponer una ruta
+description: Comparte una ruta en moto para que aparezca en «Rutas de la comunidad».
+title: "[Ruta] "
+labels: ["ruta"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ¡Gracias por compartir! Revisaremos la ruta y, si todo está bien, aparecerá en la web.
+        Solo podemos publicar rutas **tuyas** (o con permiso de su autor).
+  - type: input
+    id: nombre
+    attributes:
+      label: Nombre de la ruta
+      placeholder: "Curvas de Rellinars y Montserrat"
+    validations:
+      required: true
+  - type: input
+    id: zona
+    attributes:
+      label: Zona
+      placeholder: "Vallès Occidental / Bages"
+    validations:
+      required: true
+  - type: textarea
+    id: descripcion
+    attributes:
+      label: Descripción
+      description: Qué tiene de especial, estado del asfalto, dónde parar a comer…
+    validations:
+      required: true
+  - type: textarea
+    id: gpx
+    attributes:
+      label: Archivo GPX
+      description: Arrastra aquí tu .gpx **comprimido en .zip** (GitHub no admite .gpx directamente), o pega un enlace a gpx.studio.
+    validations:
+      required: true
+  - type: input
+    id: autor
+    attributes:
+      label: Nombre con el que quieres aparecer
+      placeholder: "Rubén"
+  - type: checkboxes
+    id: licencia
+    attributes:
+      label: Permiso
+      options:
+        - label: La ruta es mía (o tengo permiso de su autor) y acepto compartirla con licencia CC BY-SA 4.0.
+          required: true
