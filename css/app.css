@@ -107,3 +107,14 @@ button:disabled{opacity:.5;cursor:wait}
 .croute .d{font-size:14px;margin-top:4px}
 .croute button{background:var(--acc);color:#fff;border:0;border-radius:10px;padding:10px 12px;font-weight:700;cursor:pointer;white-space:nowrap}
 .mk.comm{background:var(--blue)}
+
+/* fase 4: mis rutas */
+.ghost.wide{display:block;width:100%}
+.saved{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;margin-top:10px}
+.saved .t{font-weight:700;display:flex;gap:8px;align-items:center}
+.saved .m{color:var(--mut);font-size:13px;margin-top:2px}
+.saved .acts{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.saved .acts a,.saved .acts button{border-radius:10px;padding:9px 12px;font-weight:700;text-decoration:none;cursor:pointer;border:1px solid var(--line);background:none;color:var(--tx);font-size:14px}
+.saved .acts a.go{background:var(--acc);border-color:var(--acc);color:#fff}
+.saved .acts .del{color:#ff6b6b}
+.saved input{width:100%;margin-top:8px}

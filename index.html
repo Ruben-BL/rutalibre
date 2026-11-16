@@ -23,9 +23,10 @@
 
 <main class="panel">
   <nav class="tabs" role="tablist">
-    <button role="tab" data-tab="sorpresa" class="on">Ruta sorpresa</button>
-    <button role="tab" data-tab="gpx">Desde un GPX</button>
+    <button role="tab" data-tab="sorpresa" class="on">Sorpresa</button>
+    <button role="tab" data-tab="gpx">GPX</button>
     <button role="tab" data-tab="comunidad">Comunidad</button>
+    <button role="tab" data-tab="mias">Mis rutas</button>
   </nav>
 
   <!-- ===================== RUTA SORPRESA ===================== -->
@@ -54,6 +55,7 @@
         <button class="ghost" id="againBtn">Otra ruta</button>
         <button class="ghost" id="sShare">Compartir</button>
       </div>
+      <button class="ghost wide" id="sSave">💾 Guardar en Mis rutas</button>
       <p class="hint">La línea azul es la ruta por carretera. ¿Quieres pasar por otro sitio? <b>Arrastra</b> un punto y se recalcula sola.</p>
       <details class="more">
         <summary>Para StreetCross y otros navegadores</summary>
@@ -71,19 +73,25 @@
       <span id="fname">De Wikiloc, gpx.studio… o arrástralo aquí</span>
       <input type="file" id="file" accept=".gpx,application/gpx+xml,application/xml,text/xml">
     </label>
-    <label class="lbl">Enlaces de Google Maps (más enlaces = más fiel a tu ruta)</label>
-    <div class="seg" id="linksSeg"><button data-v="1" class="on">1 enlace</button><button data-v="2">2</button><button data-v="3">3</button></div>
-    <label class="lbl">Puntos por enlace</label>
-    <div class="seg" id="perSeg"><button data-v="9" class="on">9 (app de Maps)</button><button data-v="3">3 (navegador)</button></div>
     <div class="row checks">
       <label><input type="checkbox" id="gAvh"> Evitar autopistas</label>
       <label><input type="checkbox" id="gAvt"> Evitar peajes</label>
     </div>
+    <details class="more" id="advanced">
+      <summary>Opciones avanzadas</summary>
+      <label class="lbl">Enlaces de Google Maps</label>
+      <div class="seg" id="linksSeg"><button data-v="1" class="on">1 enlace</button><button data-v="2">2</button><button data-v="3">3</button></div>
+      <p class="hint">Con 1 enlace la ruta se abre de una vez (lo normal). Con 2 o 3, la ruta se parte en tramos: más fiel en rutas muy largas, pero tendrás que abrir el siguiente tramo al acabar cada uno, mejor en una parada.</p>
+      <label class="lbl">Puntos por enlace</label>
+      <div class="seg" id="perSeg"><button data-v="9" class="on">10 (app de Maps)</button><button data-v="3">4 (navegador)</button></div>
+      <p class="hint">Usa 4 solo si el enlace se te abre en el navegador en vez de en la app de Google Maps.</p>
+    </details>
 
     <p id="gProg" class="prog hidden"></p>
     <div id="gOut" class="out hidden">
       <p class="stats" id="gStats"></p>
       <div id="legs"></div>
+      <button class="ghost wide" id="gSave">💾 Guardar en Mis rutas</button>
       <p class="hint"><span class="sw red"></span> tu ruta · <span class="sw blue"></span> por donde irá el navegador. Si en algún tramo se separan, <b>arrastra</b> el punto más cercano sobre la carretera roja.</p>
       <details class="more">
         <summary>Para StreetCross y otros navegadores</summary>
@@ -102,6 +110,14 @@
     <div id="commList"></div>
     <a class="ghost" id="proposeBtn" target="_blank" rel="noopener" style="display:block;text-align:center;text-decoration:none;color:var(--tx)">➕ Proponer una ruta</a>
     <p class="hint">Se propone desde GitHub (hace falta una cuenta gratuita). Solo rutas tuyas o con permiso de su autor; se comparten con licencia CC BY-SA 4.0.</p>
+  </section>
+
+  <!-- ===================== MIS RUTAS ===================== -->
+  <section id="tab-mias" class="hidden">
+    <p class="hint" style="margin-top:0">Tus rutas ya preparadas. «Abrir en Maps» arranca la navegación directamente, sin recalcular nada.</p>
+    <p id="miasMsg" class="hint"></p>
+    <div id="miasList"></div>
+    <p class="hint">Se guardan solo en este móvil, dentro del navegador. Si borras los datos de navegación, se pierden. Para conservar una ruta para siempre, descarga su GPX.</p>
   </section>
 
   <!-- lista de pueblos (compartida) -->

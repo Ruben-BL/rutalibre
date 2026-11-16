@@ -60,15 +60,16 @@ export async function rerouteSurprise(plan, opts, router) {
 }
 
 /**
- * Ruta desde un track (GPX). Empieza con pocos puntos y va añadiendo uno donde la ruta
- * calculada se separa más del track, hasta que coincide o se acaba el presupuesto de puntos.
+ * Ruta desde un track (GPX). Empieza con la mitad de los puntos y va añadiendo uno donde la ruta
+ * calculada se separa más del track, hasta usar los 10 de Google Maps. Con todos usados, sigue
+ * cambiando los puntos que sobran por otros donde hacen falta. Se queda con el mejor resultado.
  *   maxLinks: enlaces de Google Maps que aceptas (cada uno: `per` paradas + destino).
  */
-export async function planTrack(track, { maxLinks = 1, per = 9, target = 0.97, ...opts }, router, progress = () => {}) {
+export async function planTrack(track, { maxLinks = 1, per = 9, target = 0.995, ...opts }, router, progress = () => {}) {
   const cum = G.cumulative(track), totalKm = cum[cum.length - 1] / 1000;
   const end = track.length - 1;
   const budget = maxLinks * (per + 1) - 1;            // puntos intermedios posibles (sin contar el destino final)
-  const n0 = Math.max(2, Math.min(budget, Math.floor((per + 1) / 2) * maxLinks, Math.round(totalKm / 20)));
+  const n0 = Math.max(2, Math.min(budget, Math.ceil(budget / 2)));   // se empieza con la mitad de los puntos
   let idx = initialMidpoints(track, cum, n0);
   // Cada punto se ajusta a la carretera dentro de la propia petición de ruta
   // (nada de caminos de servicio ni parkings: clase "residential" o superior).
@@ -89,8 +90,13 @@ export async function planTrack(track, { maxLinks = 1, per = 9, target = 0.97, .
 
   let best = null;
   const tried = new Map();                                // km de hueco → veces probado
+  const keepers = new Set();                              // puntos que ya se vio que no sobran
   let swaps = 0;
-  const maxIt = budget - idx.length + 8;
+  const kmOf = i => cum[i] / 1000;
+  // Un punto nuevo va en la mitad del tramo donde la ruta se separa del track: "clava" esa carretera.
+  // (Se probó ponerlo justo tras el cruce de separación y daba peores resultados.)
+  const fixPoint = g => g.mid;
+  const maxIt = budget + 12;
   for (let it = 0; it < maxIt; it++) {
     progress(`Comprobando la ruta… (${idx.length} puntos)`);
     let r;
@@ -106,24 +112,43 @@ export async function planTrack(track, { maxLinks = 1, per = 9, target = 0.97, .
       idx = uniqueSorted(idx);
       continue;
     }
-    if (!best || cmp.pct > best.cmp.pct) best = { idx: idx.slice(), r, cmp };
-    if (cmp.pct >= target || !cmp.gaps.length) break;
-    const gap = cmp.gaps.find(g => (tried.get(Math.round(g.fromKm)) || 0) < 2
-      && !idx.some(i => Math.abs(cum[i] - cum[g.mid]) < 300) && !banned.some(m => Math.abs(m - cum[g.mid]) < 500));
-    if (!gap) break;
-    tried.set(Math.round(gap.fromKm), (tried.get(Math.round(gap.fromKm)) || 0) + 1);
-    if (idx.length >= budget) {
-      // sin puntos libres: cambiar el punto más "prescindible" (el que menos se aparta de la línea
-      // entre sus vecinos) por uno en el hueco más grande. Si empeora, se queda el mejor resultado.
-      if (++swaps > 3) break;
-      const base = best.idx; let worst = -1, wv = Infinity;
+    if (!best || cmp.pct > best.cmp.pct + 1e-9) best = { idx: idx.slice(), r, cmp };
+    if (best.cmp.pct >= target) break;
+    const gaps = best.cmp.gaps, base = best.idx;
+    let add = -1;
+    for (const g of gaps) {
+      const key = Math.round(g.fromKm * 2), n = tried.get(key) || 0;
+      if (n >= 2 || banned.some(m => Math.abs(m - cum[g.mid]) < 500)) continue;
+      tried.set(key, n + 1);
+      const cand = fixPoint(g);
+      if (base.some(i => Math.abs(cum[i] - cum[cand]) < 200)) continue;
+      add = cand; break;
+    }
+    if (add < 0) break;
+
+    if (base.length < budget) { idx = uniqueSorted([...base, add]); continue; }
+
+    // Sin puntos libres: buscar un punto que sobre (sus dos tramos coinciden con el track y es el
+    // que menos se aparta de la línea recta entre sus vecinos) y cambiarlo por el nuevo.
+    // Si el cambio empeora, en la siguiente vuelta se parte otra vez del mejor resultado.
+    if (++swaps > 6) break;
+    // primero se buscan puntos lejos de cualquier hueco; si no hay, el que menos se aparta
+    const pick = avoidGaps => {
+      let w = -1, wv = Infinity;
       for (let k = 0; k < base.length; k++) {
+        if (keepers.has(base[k])) continue;
+        const lo = k ? kmOf(base[k - 1]) : 0, hi = k < base.length - 1 ? kmOf(base[k + 1]) : totalKm;
+        if (avoidGaps && gaps.some(g => g.toKm > lo && g.fromKm < hi)) continue;
         const a = k ? track[base[k - 1]] : track[0], b = k < base.length - 1 ? track[base[k + 1]] : track[end];
         const v = G.haversine(a, track[base[k]]) + G.haversine(track[base[k]], b) - G.haversine(a, b);
-        if (v < wv) { wv = v; worst = k; }
+        if (v < wv) { wv = v; w = k; }
       }
-      idx = uniqueSorted([...base.filter((_, k) => k !== worst), gap.mid]);
-    } else idx = uniqueSorted([...idx, gap.mid]);
+      return w;
+    };
+    let worst = pick(true); if (worst < 0) worst = pick(false);
+    if (worst < 0) break;
+    keepers.add(base[worst]);                              // si al quitarlo empeora, ya no se vuelve a probar
+    idx = uniqueSorted([...base.filter((_, k) => k !== worst), add]);
   }
   if (!best) throw new Error('No he podido ajustar la ruta a carreteras. Prueba de nuevo.');
   ({ idx } = best); const { r, cmp } = best;
